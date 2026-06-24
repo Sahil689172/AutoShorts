@@ -249,6 +249,7 @@ From the project root:
 python -m uvicorn backend.api:app --reload
 ```
 
+
 API runs at `http://127.0.0.1:8000` · Docs at `http://127.0.0.1:8000/docs`
 
 ### 6. Start the frontend
