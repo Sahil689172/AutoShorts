@@ -33,6 +33,7 @@ from agents.timeline_video_builder import (
     probe_duration,
     resolve_ffmpeg_tool,
 )
+from agents.query_agent import QueryAgent
 from agents.visual_asset_agent import (
     APIKeyMissingError,
     CACHE_DIR,
@@ -43,7 +44,6 @@ from agents.visual_asset_agent import (
     SearchCache,
     PexelsClient,
     PixabayClient,
-    keywords_from_description,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,6 +143,7 @@ class SceneRecord:
     title: str
     visual_description: str
     duration_seconds: float
+    queries: list[str] | None = None
     query: str = ""
     asset_kind: AssetKind | None = None
     source: SourceKind | None = None
@@ -150,6 +151,11 @@ class SceneRecord:
     motion_effect: str | None = None
     pending_url: str | None = None
     pending_ext: str | None = None
+    selected_asset_url: str = ""
+
+    def __post_init__(self) -> None:
+        if self.queries is None:
+            self.queries = []
 
 
 @dataclass
@@ -352,6 +358,7 @@ class VisualTimelineAgent:
         on_timing_sync: Any | None = None,
         max_search_workers: int | None = None,
         max_download_workers: int | None = None,
+        query_agent: QueryAgent | None = None,
     ) -> None:
         self.scenes_path = Path(scenes_path)
         self.assets_dir = Path(assets_dir)
@@ -373,6 +380,7 @@ class VisualTimelineAgent:
         default_download = int(os.environ.get("ASSET_DOWNLOAD_WORKERS", "10"))
         self.max_search_workers = max(1, max_search_workers or default_search)
         self.max_download_workers = max(1, max_download_workers or default_download)
+        self.query_agent = query_agent or QueryAgent()
         self._scenes: list[SceneRecord] = []
         self._narration_seconds = 0.0
         self._temp_dir: Path | None = None
@@ -397,7 +405,9 @@ class VisualTimelineAgent:
         self._normalize_durations()
 
         asset_started = time.perf_counter()
-        self._print_progress(2, "Resolving scene assets (parallel)...")
+        self._print_progress(2, "Generating search queries...")
+        self._generate_search_queries()
+        self._print_progress(3, "Resolving scene assets (parallel)...")
         self._restore_from_topic_cache()
         self._search_and_download_assets_parallel()
         self._asset_search_seconds = time.perf_counter() - asset_started
@@ -499,14 +509,12 @@ class VisualTimelineAgent:
             except (TypeError, ValueError):
                 duration = 5.0
             duration = max(MIN_SEGMENT_SECONDS, duration)
-            query = keywords_from_description(visual_description, title)
             self._scenes.append(
                 SceneRecord(
                     scene_number=scene_number,
                     title=title,
                     visual_description=visual_description,
                     duration_seconds=duration,
-                    query=query,
                 )
             )
 
@@ -518,7 +526,7 @@ class VisualTimelineAgent:
         for scene in self._scenes:
             print(
                 f"  Scene {scene.scene_number}: {scene.title} "
-                f"({scene.duration_seconds:.1f}s) — {scene.query}",
+                f"({scene.duration_seconds:.1f}s)",
                 flush=True,
             )
 
@@ -567,20 +575,43 @@ class VisualTimelineAgent:
             flush=True,
         )
 
+    def _generate_search_queries(self) -> None:
+        """Build semantic Pexels queries for each scene via QueryAgent."""
+        for scene in self._scenes:
+            if scene.asset_path or scene.queries:
+                continue
+            scene.queries = self.query_agent.generate_queries(
+                scene.title,
+                scene.visual_description,
+            )
+            scene.query = scene.queries[0] if scene.queries else ""
+            logger.info("Scene %d title: %s", scene.scene_number, scene.title)
+            logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
+            print(
+                f"  Scene {scene.scene_number} ({scene.title}): {scene.queries}",
+                flush=True,
+            )
+
     def _restore_from_topic_cache(self) -> None:
         if not self.topic_cache or not self.topic_cache.is_available():
             return
         restored = 0
         for scene in self._scenes:
-            path, kind, source = self.topic_cache.try_restore_scene(
-                scene.scene_number,
-                scene.query,
-            )
-            if path:
-                scene.asset_path = path
-                scene.asset_kind = kind or "video"
-                scene.source = source
-                restored += 1
+            if scene.asset_path:
+                continue
+            candidates = scene.queries or ([scene.query] if scene.query else [])
+            for query in candidates:
+                path, kind, source = self.topic_cache.try_restore_scene(
+                    scene.scene_number,
+                    query,
+                )
+                if path:
+                    scene.asset_path = path
+                    scene.asset_kind = kind or "video"
+                    scene.source = source
+                    scene.query = query
+                    restored += 1
+                    break
         if restored:
             print(f"  Topic cache: restored {restored} scene asset(s)", flush=True)
 
@@ -623,74 +654,124 @@ class VisualTimelineAgent:
                         logger.error("Parallel download error: %s", exc)
 
     def _resolve_scene_asset(self, scene: SceneRecord) -> None:
-        """Search providers with early exit; parallel image+Pixabay only if no video."""
+        """Search providers with early exit; try each generated query in order."""
         if scene.asset_path or scene.pending_url:
             return
 
-        if self.pexels_video.api_key:
-            try:
-                candidates = self.pexels_video.search(scene.query)
-                if candidates:
-                    best = candidates[0]
-                    scene.asset_kind = "video"
-                    scene.source = "pexels_video"
-                    scene.pending_url = best.url
-                    scene.pending_ext = ".mp4"
-                    logger.info("Scene %d: Pexels video selected", scene.scene_number)
-                    return
-            except Exception as exc:
-                logger.warning("Scene %d Pexels video search failed: %s", scene.scene_number, exc)
-
-        def pexels_image_hits():
-            if not self.pexels_images.api_key:
-                return None
-            candidates = self.pexels_images.search(scene.query, per_page=6)
-            return candidates[0] if candidates else None
-
-        def pixabay_hits():
-            if not self.pixabay.api_key:
-                return None
-            candidates = self.pixabay.search(scene.query, per_page=6)
-            return candidates[0] if candidates else None
-
-        image_best = pixabay_best = None
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {}
-            if self.pexels_images.api_key:
-                futures[executor.submit(pexels_image_hits)] = "pexels_image"
-            if self.pixabay.api_key:
-                futures[executor.submit(pixabay_hits)] = "pixabay"
-            for future in as_completed(futures):
-                source = futures[future]
-                try:
-                    hit = future.result()
-                except Exception as exc:
-                    logger.warning(
-                        "Scene %d %s search failed: %s",
-                        scene.scene_number,
-                        source,
-                        exc,
-                    )
-                    continue
-                if source == "pexels_image":
-                    image_best = hit
-                else:
-                    pixabay_best = hit
-
-        if image_best:
-            scene.asset_kind = "image"
-            scene.source = "pexels_image"
-            scene.pending_url = image_best.url
-            scene.pending_ext = ".jpg"
-            logger.info("Scene %d: Pexels image selected", scene.scene_number)
+        queries = scene.queries or ([scene.query] if scene.query else [])
+        if not queries:
+            logger.warning("Scene %d has no search queries", scene.scene_number)
             return
 
-        if pixabay_best:
-            scene.asset_kind = "image"
-            scene.source = "pixabay_image"
-            scene.pending_url = pixabay_best.url
-            scene.pending_ext = ".jpg"
-            logger.info("Scene %d: Pixabay image selected", scene.scene_number)
+        if self.pexels_video.api_key:
+            for query in queries:
+                try:
+                    candidates = self.pexels_video.search(query)
+                    if candidates:
+                        best = candidates[0]
+                        scene.query = query
+                        scene.asset_kind = "video"
+                        scene.source = "pexels_video"
+                        scene.pending_url = best.url
+                        scene.pending_ext = ".mp4"
+                        scene.selected_asset_url = best.url
+                        self._log_scene_selection(scene, query, best.url, "pexels_video")
+                        return
+                except Exception as exc:
+                    logger.warning(
+                        "Scene %d Pexels video search failed for %r: %s",
+                        scene.scene_number,
+                        query,
+                        exc,
+                    )
+
+        def pexels_image_for_query(query: str):
+            if not self.pexels_images.api_key:
+                return None, None
+            candidates = self.pexels_images.search(query, per_page=6)
+            if candidates:
+                return query, candidates[0]
+            return None, None
+
+        def pixabay_for_query(query: str):
+            if not self.pixabay.api_key:
+                return None, None
+            candidates = self.pixabay.search(query, per_page=6)
+            if candidates:
+                return query, candidates[0]
+            return None, None
+
+        for query in queries:
+            image_best = pixabay_best = None
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {}
+                if self.pexels_images.api_key:
+                    futures[executor.submit(pexels_image_for_query, query)] = "pexels_image"
+                if self.pixabay.api_key:
+                    futures[executor.submit(pixabay_for_query, query)] = "pixabay"
+                for future in as_completed(futures):
+                    source = futures[future]
+                    try:
+                        hit_query, hit = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "Scene %d %s search failed for %r: %s",
+                            scene.scene_number,
+                            source,
+                            query,
+                            exc,
+                        )
+                        continue
+                    if hit is None:
+                        continue
+                    if source == "pexels_image":
+                        image_best = (hit_query, hit)
+                    else:
+                        pixabay_best = (hit_query, hit)
+
+            if image_best:
+                hit_query, hit = image_best
+                scene.query = hit_query
+                scene.asset_kind = "image"
+                scene.source = "pexels_image"
+                scene.pending_url = hit.url
+                scene.pending_ext = ".jpg"
+                scene.selected_asset_url = hit.url
+                self._log_scene_selection(scene, hit_query, hit.url, "pexels_image")
+                return
+
+            if pixabay_best:
+                hit_query, hit = pixabay_best
+                scene.query = hit_query
+                scene.asset_kind = "image"
+                scene.source = "pixabay_image"
+                scene.pending_url = hit.url
+                scene.pending_ext = ".jpg"
+                scene.selected_asset_url = hit.url
+                self._log_scene_selection(scene, hit_query, hit.url, "pixabay_image")
+                return
+
+    def _log_scene_selection(
+        self,
+        scene: SceneRecord,
+        selected_query: str,
+        asset_url: str,
+        source: str,
+    ) -> None:
+        logger.info("Scene %d title: %s", scene.scene_number, scene.title)
+        logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
+        logger.info("Scene %d selected query: %s", scene.scene_number, selected_query)
+        logger.info(
+            "Scene %d selected asset: %s (%s)",
+            scene.scene_number,
+            asset_url,
+            source,
+        )
+        print(
+            f"  Scene {scene.scene_number} | selected query: {selected_query!r} | "
+            f"asset: {source}",
+            flush=True,
+        )
 
     def _download_scene_asset(self, scene: SceneRecord) -> None:
         url = scene.pending_url
