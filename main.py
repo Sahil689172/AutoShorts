@@ -50,14 +50,8 @@ from script_generator import (
     ScriptGeneratorError,
     ScriptValidationError,
 )
-from voice_generator import (
-    PiperNotFoundError,
-    ScriptNotFoundError,
-    VoiceGenerationError,
-    VoiceGenerator,
-    VoiceGeneratorError,
-    VoiceModelNotFoundError,
-)
+from backend.services.narration.exceptions import NarrationError, NarratorNotFoundError, ScriptNotFoundError
+from voice_generator import VoiceGenerator
 from pipeline_timing import (
     PHASE_CAPTIONS,
     PHASE_METADATA,
@@ -157,19 +151,13 @@ def main() -> int:
             logger.info("Phase 2: generating voice narration")
             print("\nPhase 2 — Voice generation")
             audio_path = voice_generator.generate()
-    except PiperNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    except VoiceModelNotFoundError as exc:
+    except NarratorNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except ScriptNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    except VoiceGenerationError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    except VoiceGeneratorError as exc:
+    except NarrationError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

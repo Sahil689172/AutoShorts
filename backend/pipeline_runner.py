@@ -236,27 +236,21 @@ def _phase_metadata(script: str, topic: str) -> None:
 
 
 def _phase_voice() -> None:
-    from voice_generator import (
-        PiperNotFoundError,
+    from backend.services.narration.exceptions import (
+        NarrationError,
+        NarratorNotFoundError,
         ScriptNotFoundError,
-        VoiceGenerationError,
-        VoiceGenerator,
-        VoiceGeneratorError,
-        VoiceModelNotFoundError,
     )
+    from voice_generator import VoiceGenerator
 
     voice_generator = VoiceGenerator()
     try:
         voice_generator.generate()
-    except PiperNotFoundError as exc:
-        raise PipelineError(str(exc), "Voice Generation") from exc
-    except VoiceModelNotFoundError as exc:
+    except NarratorNotFoundError as exc:
         raise PipelineError(str(exc), "Voice Generation") from exc
     except ScriptNotFoundError as exc:
         raise PipelineError(str(exc), "Voice Generation") from exc
-    except VoiceGenerationError as exc:
-        raise PipelineError(str(exc), "Voice Generation") from exc
-    except VoiceGeneratorError as exc:
+    except NarrationError as exc:
         raise PipelineError(str(exc), "Voice Generation") from exc
 
 

@@ -7,13 +7,13 @@ from voice_generator import (
     SCRIPT_PATH,
     VOICE_MODEL,
     VOICE_SPEED,
-    resolve_piper_executable,
     PiperNotFoundError,
     ScriptNotFoundError,
     VoiceGenerationError,
     VoiceGenerator,
     VoiceGeneratorError,
     VoiceModelNotFoundError,
+    resolve_piper_executable,
 )
 
 __all__ = [
