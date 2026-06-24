@@ -26,9 +26,13 @@ def load_provider(
     voice_config: Path | str | None = None,
     voice_speed: float | None = None,
     timeout_multiplier: float | None = None,
+    kokoro_model_path: Path | str | None = None,
+    kokoro_voices_path: Path | str | None = None,
+    kokoro_voice: str | None = None,
 ) -> NarratorProvider:
     """Instantiate the configured narrator provider."""
     provider_name = (name or os.environ.get("NARRATOR_PROVIDER", DEFAULT_PROVIDER)).lower()
+    logger.info("Using narrator provider: %s", provider_name)
 
     if provider_name == "piper":
         from backend.services.narration.providers.piper_provider import PiperProvider
@@ -45,6 +49,20 @@ def load_provider(
         if timeout_multiplier is not None:
             kwargs["timeout_multiplier"] = timeout_multiplier
         return PiperProvider(**kwargs)
+
+    if provider_name == "kokoro":
+        from backend.services.narration.providers.kokoro_provider import KokoroProvider
+
+        kwargs: dict = {}
+        if kokoro_model_path is not None:
+            kwargs["model_path"] = kokoro_model_path
+        if kokoro_voices_path is not None:
+            kwargs["voices_path"] = kokoro_voices_path
+        if kokoro_voice is not None:
+            kwargs["voice"] = kokoro_voice
+        if voice_speed is not None:
+            kwargs["speed"] = voice_speed
+        return KokoroProvider(**kwargs)
 
     raise NarratorNotFoundError(
         f"Unknown narrator provider: {provider_name!r}. "
@@ -67,6 +85,9 @@ class NarrationManager:
         voice_config: Path | str | None = None,
         voice_speed: float | None = None,
         timeout_multiplier: float | None = None,
+        kokoro_model_path: Path | str | None = None,
+        kokoro_voices_path: Path | str | None = None,
+        kokoro_voice: str | None = None,
     ) -> None:
         self.script_path = Path(script_path)
         self.output_path = Path(output_path)
@@ -77,6 +98,9 @@ class NarrationManager:
             voice_config=voice_config,
             voice_speed=voice_speed,
             timeout_multiplier=timeout_multiplier,
+            kokoro_model_path=kokoro_model_path,
+            kokoro_voices_path=kokoro_voices_path,
+            kokoro_voice=kokoro_voice,
         )
 
     def generate(self) -> Path:
