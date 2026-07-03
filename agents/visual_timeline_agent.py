@@ -33,7 +33,15 @@ from agents.timeline_video_builder import (
     probe_duration,
     resolve_ffmpeg_tool,
 )
+from agents.candidate_pool import (
+    RESULTS_PER_QUERY,
+    PoolStats,
+    SelectionResult,
+    merge_query_results,
+    select_best_candidate,
+)
 from agents.query_agent import QueryAgent
+from agents.session_asset_registry import SessionAssetRegistry, video_hash
 from agents.visual_asset_agent import (
     APIKeyMissingError,
     CACHE_DIR,
@@ -111,8 +119,10 @@ class VideoCandidate:
     width: int
     height: int
     duration: float
+    clip_id: str = ""
     source: str = "pexels_video"
     photographer: str = ""
+    source_query: str = ""
 
     @property
     def is_portrait(self) -> bool:
@@ -152,6 +162,9 @@ class SceneRecord:
     pending_url: str | None = None
     pending_ext: str | None = None
     selected_asset_url: str = ""
+    selected_clip_id: str = ""
+    selection_reason: str = ""
+    previously_used: bool = False
 
     def __post_init__(self) -> None:
         if self.queries is None:
@@ -278,11 +291,13 @@ class PexelsVideoClient:
             if width < MIN_VIDEO_WIDTH or height < MIN_VIDEO_HEIGHT:
                 continue
             user = video.get("user") or {}
+            clip_id = str(video.get("id") or "")
             candidate = VideoCandidate(
                 url=url,
                 width=width,
                 height=height,
                 duration=duration,
+                clip_id=clip_id,
                 photographer=str(user.get("name") or ""),
             )
             candidates.append(candidate)
@@ -292,6 +307,7 @@ class PexelsVideoClient:
                     "width": width,
                     "height": height,
                     "duration": duration,
+                    "clip_id": clip_id,
                     "source": "pexels_video",
                     "photographer": candidate.photographer,
                 }
@@ -330,6 +346,7 @@ class PexelsVideoClient:
             width=int(item["width"]),
             height=int(item["height"]),
             duration=float(item.get("duration") or MIN_VIDEO_DURATION),
+            clip_id=str(item.get("clip_id") or ""),
             photographer=str(item.get("photographer") or ""),
         )
 
@@ -359,6 +376,7 @@ class VisualTimelineAgent:
         max_search_workers: int | None = None,
         max_download_workers: int | None = None,
         query_agent: QueryAgent | None = None,
+        session_registry: SessionAssetRegistry | None = None,
     ) -> None:
         self.scenes_path = Path(scenes_path)
         self.assets_dir = Path(assets_dir)
@@ -381,6 +399,8 @@ class VisualTimelineAgent:
         self.max_search_workers = max(1, max_search_workers or default_search)
         self.max_download_workers = max(1, max_download_workers or default_download)
         self.query_agent = query_agent or QueryAgent()
+        self.session_registry = session_registry or SessionAssetRegistry()
+        self._scene_url_queries: dict[int, dict[str, str]] = {}
         self._scenes: list[SceneRecord] = []
         self._narration_seconds = 0.0
         self._temp_dir: Path | None = None
@@ -397,6 +417,7 @@ class VisualTimelineAgent:
         VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         self.search_cache.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.session_registry.reset_for_session()
         self._verify_ffmpeg()
 
         self._print_progress(1, "Reading scenes...")
@@ -611,29 +632,43 @@ class VisualTimelineAgent:
                     scene.source = source
                     scene.query = query
                     restored += 1
+                    if scene.asset_kind == "video":
+                        self._register_restored_video(scene, path, source)
                     break
         if restored:
             print(f"  Topic cache: restored {restored} scene asset(s)", flush=True)
 
     def _search_and_download_assets_parallel(self) -> None:
         needs_search = [s for s in self._scenes if not s.asset_path]
+        pools: dict[int, list[VideoCandidate]] = {}
+
         if needs_search:
             workers = min(self.max_search_workers, len(needs_search))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(self._resolve_scene_asset, scene): scene
+                    executor.submit(self._build_video_candidate_pool, scene): scene
                     for scene in needs_search
                 }
                 for future in as_completed(futures):
                     scene = futures[future]
                     try:
-                        future.result()
+                        pools[scene.scene_number] = future.result()
                     except Exception as exc:
                         logger.error(
-                            "Scene %d asset resolution failed: %s",
+                            "Scene %d candidate pool build failed: %s",
                             scene.scene_number,
                             exc,
                         )
+                        pools[scene.scene_number] = []
+
+            for scene in sorted(needs_search, key=lambda s: s.scene_number):
+                if scene.asset_path or scene.pending_url:
+                    continue
+                pool = pools.get(scene.scene_number, [])
+                if pool:
+                    self._select_video_from_pool(scene, pool)
+                if not scene.pending_url:
+                    self._resolve_image_fallback(scene)
 
         to_download = [
             s
@@ -653,37 +688,97 @@ class VisualTimelineAgent:
                     except Exception as exc:
                         logger.error("Parallel download error: %s", exc)
 
-    def _resolve_scene_asset(self, scene: SceneRecord) -> None:
-        """Search providers with early exit; try each generated query in order."""
-        if scene.asset_path or scene.pending_url:
+    def _build_video_candidate_pool(self, scene: SceneRecord) -> list[VideoCandidate]:
+        """Search every query and merge into one deduplicated candidate pool."""
+        queries = scene.queries or ([scene.query] if scene.query else [])
+        if not queries or not self.pexels_video.api_key:
+            return []
+
+        query_results: dict[str, list[VideoCandidate]] = {}
+        url_to_query: dict[str, str] = {}
+        workers = min(len(queries), 5)
+
+        def search_query(query: str) -> tuple[str, list[VideoCandidate]]:
+            try:
+                clips = self.pexels_video.search(query, per_page=RESULTS_PER_QUERY)
+                tagged = [
+                    VideoCandidate(
+                        url=c.url,
+                        width=c.width,
+                        height=c.height,
+                        duration=c.duration,
+                        clip_id=c.clip_id,
+                        source=c.source,
+                        photographer=c.photographer,
+                        source_query=query,
+                    )
+                    for c in clips[:RESULTS_PER_QUERY]
+                ]
+                return query, tagged
+            except Exception as exc:
+                logger.warning(
+                    "Scene %d Pexels video search failed for %r: %s",
+                    scene.scene_number,
+                    query,
+                    exc,
+                )
+                return query, []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(search_query, q): q for q in queries}
+            for future in as_completed(futures):
+                query, clips = future.result()
+                query_results[query] = clips
+
+        for query in queries:
+            for clip in query_results.get(query, []):
+                if clip.url not in url_to_query:
+                    url_to_query[clip.url] = query
+
+        pool, stats = merge_query_results(query_results)
+        self._scene_url_queries[scene.scene_number] = url_to_query
+        self._log_candidate_pool(scene, stats)
+        return pool
+
+    def _select_video_from_pool(
+        self,
+        scene: SceneRecord,
+        pool: list[VideoCandidate],
+    ) -> None:
+        url_to_query = self._scene_url_queries.get(scene.scene_number, {})
+        selection = select_best_candidate(
+            pool,
+            self.session_registry,
+            source_queries=url_to_query,
+        )
+        if selection is None:
             return
 
+        clip = selection.candidate
+        clip_id = clip.clip_id or video_hash(clip.url)
+        scene.query = selection.source_query or clip.source_query or scene.query
+        scene.asset_kind = "video"
+        scene.source = "pexels_video"
+        scene.pending_url = clip.url
+        scene.pending_ext = ".mp4"
+        scene.selected_asset_url = clip.url
+        scene.selected_clip_id = clip_id
+        scene.selection_reason = selection.reason
+        scene.previously_used = selection.previously_used
+
+        self.session_registry.register(
+            clip_id,
+            "pexels_video",
+            clip.url,
+            scene.scene_number,
+        )
+        self._log_scene_selection(scene, selection)
+
+    def _resolve_image_fallback(self, scene: SceneRecord) -> None:
+        """Image/Pixabay fallback when no suitable video candidate is selected."""
         queries = scene.queries or ([scene.query] if scene.query else [])
         if not queries:
-            logger.warning("Scene %d has no search queries", scene.scene_number)
             return
-
-        if self.pexels_video.api_key:
-            for query in queries:
-                try:
-                    candidates = self.pexels_video.search(query)
-                    if candidates:
-                        best = candidates[0]
-                        scene.query = query
-                        scene.asset_kind = "video"
-                        scene.source = "pexels_video"
-                        scene.pending_url = best.url
-                        scene.pending_ext = ".mp4"
-                        scene.selected_asset_url = best.url
-                        self._log_scene_selection(scene, query, best.url, "pexels_video")
-                        return
-                except Exception as exc:
-                    logger.warning(
-                        "Scene %d Pexels video search failed for %r: %s",
-                        scene.scene_number,
-                        query,
-                        exc,
-                    )
 
         def pexels_image_for_query(query: str):
             if not self.pexels_images.api_key:
@@ -737,7 +832,10 @@ class VisualTimelineAgent:
                 scene.pending_url = hit.url
                 scene.pending_ext = ".jpg"
                 scene.selected_asset_url = hit.url
-                self._log_scene_selection(scene, hit_query, hit.url, "pexels_image")
+                scene.selected_clip_id = video_hash(hit.url)
+                scene.selection_reason = f"Video pool empty; Pexels image fallback for {hit_query!r}"
+                scene.previously_used = False
+                self._log_image_selection(scene, hit_query, hit.url, "pexels_image")
                 return
 
             if pixabay_best:
@@ -748,25 +846,83 @@ class VisualTimelineAgent:
                 scene.pending_url = hit.url
                 scene.pending_ext = ".jpg"
                 scene.selected_asset_url = hit.url
-                self._log_scene_selection(scene, hit_query, hit.url, "pixabay_image")
+                scene.selected_clip_id = video_hash(hit.url)
+                scene.selection_reason = f"Video pool empty; Pixabay image fallback for {hit_query!r}"
+                scene.previously_used = False
+                self._log_image_selection(scene, hit_query, hit.url, "pixabay_image")
                 return
 
+    def _register_restored_video(
+        self,
+        scene: SceneRecord,
+        path: Path,
+        source: str,
+    ) -> None:
+        clip_id = scene.selected_clip_id or f"cache-{scene.scene_number}"
+        url = scene.selected_asset_url or str(path.resolve())
+        scene.selected_clip_id = clip_id
+        self.session_registry.register(
+            clip_id,
+            source or "cache",
+            url,
+            scene.scene_number,
+        )
+
+    def _log_candidate_pool(self, scene: SceneRecord, stats: PoolStats) -> None:
+        logger.info("Scene %d title: %s", scene.scene_number, scene.title)
+        logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
+        logger.info("Scene %d results per query: %s", scene.scene_number, stats.results_per_query)
+        logger.info("Scene %d candidate pool size: %d", scene.scene_number, stats.pool_size)
+        logger.info("Scene %d duplicate count: %d", scene.scene_number, stats.duplicate_count)
+        per_query = ", ".join(f"{q!r}: {n}" for q, n in stats.results_per_query.items())
+        print(
+            f"  Scene {scene.scene_number} ({scene.title}) | "
+            f"pool: {stats.pool_size} clips ({stats.duplicate_count} dupes) | "
+            f"per query: {per_query}",
+            flush=True,
+        )
+
     def _log_scene_selection(
+        self,
+        scene: SceneRecord,
+        selection: SelectionResult,
+    ) -> None:
+        clip = selection.candidate
+        clip_id = clip.clip_id or video_hash(clip.url)
+        used_label = "YES" if selection.previously_used else "NO"
+        logger.info("Scene %d title: %s", scene.scene_number, scene.title)
+        logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
+        logger.info("Scene %d selected query: %s", scene.scene_number, selection.source_query)
+        logger.info("Scene %d selected clip id: %s", scene.scene_number, clip_id)
+        logger.info("Scene %d previously used: %s", scene.scene_number, used_label)
+        logger.info("Scene %d reason for selection: %s", scene.scene_number, selection.reason)
+        logger.info(
+            "Scene %d selected asset: %s (pexels_video)",
+            scene.scene_number,
+            clip.url,
+        )
+        if selection.fallback_mode:
+            print(
+                "  No unique clip available. Using highest-ranked previous clip.",
+                flush=True,
+            )
+        print(
+            f"  Scene {scene.scene_number} | clip id: {clip_id} | "
+            f"Previously Used: {used_label} | "
+            f"query: {selection.source_query!r}",
+            flush=True,
+        )
+        print(f"    Reason: {selection.reason}", flush=True)
+
+    def _log_image_selection(
         self,
         scene: SceneRecord,
         selected_query: str,
         asset_url: str,
         source: str,
     ) -> None:
-        logger.info("Scene %d title: %s", scene.scene_number, scene.title)
-        logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
         logger.info("Scene %d selected query: %s", scene.scene_number, selected_query)
-        logger.info(
-            "Scene %d selected asset: %s (%s)",
-            scene.scene_number,
-            asset_url,
-            source,
-        )
+        logger.info("Scene %d selected asset: %s (%s)", scene.scene_number, asset_url, source)
         print(
             f"  Scene {scene.scene_number} | selected query: {selected_query!r} | "
             f"asset: {source}",
