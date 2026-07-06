@@ -59,6 +59,21 @@ Visual Description:
 
 Return JSON with key "queries" containing 3-5 stock footage search strings (max 4 words each)."""
 
+OBJECT_AWARE_USER_PROMPT_TEMPLATE = """Title: {title}
+
+Visual Description:
+{visual_description}
+
+Narration:
+{narration_text}
+
+Extracted Visual Objects:
+{objects_block}
+
+Use the extracted objects above to produce precise stock footage search queries.
+Each query should target a specific filmable object or component (max 4 words each).
+Return JSON with key "queries" containing 3-5 search strings."""
+
 COLLECTION_SYSTEM_PROMPT = """You are a stock footage librarian building a local media library.
 Given a topic, produce diverse search queries for Pexels video search.
 
@@ -100,29 +115,55 @@ class QueryAgent:
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         self.model = model
 
-    def generate_queries(self, title: str, visual_description: str) -> list[str]:
+    def generate_queries(
+        self,
+        title: str,
+        visual_description: str,
+        *,
+        extracted_objects: Any | None = None,
+        narration_text: str = "",
+    ) -> list[str]:
         """Return 3-5 optimized Pexels search queries for a scene."""
         title = title.strip()
         visual_description = visual_description.strip()
+        narration_text = narration_text.strip()
         if not visual_description:
             raise QueryGenerationError("visual_description is empty")
+
+        objects_block = ""
+        if extracted_objects is not None and hasattr(extracted_objects, "to_prompt_block"):
+            objects_block = extracted_objects.to_prompt_block()
+
+        use_objects = bool(objects_block.strip())
 
         last_error: QueryGenerationError | None = None
         for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
             try:
-                raw = self._chat(
-                    SYSTEM_PROMPT,
-                    USER_PROMPT_TEMPLATE.format(
+                if use_objects:
+                    user_prompt = OBJECT_AWARE_USER_PROMPT_TEMPLATE.format(
                         title=title or "Scene",
                         visual_description=visual_description,
-                    ),
+                        narration_text=narration_text or "(none)",
+                        objects_block=objects_block,
+                    )
+                else:
+                    user_prompt = USER_PROMPT_TEMPLATE.format(
+                        title=title or "Scene",
+                        visual_description=visual_description,
+                    )
+                raw = self._chat(
+                    SYSTEM_PROMPT,
+                    user_prompt,
                     json_mode=True,
                 )
                 queries = self._parse_queries_json(raw)
+                context = f"{title} {visual_description} {narration_text}"
+                if extracted_objects is not None:
+                    context += " " + " ".join(extracted_objects.all_objects())
                 queries = self._sanitize_queries(
                     queries,
                     title=title,
-                    visual_description=visual_description,
+                    visual_description=context,
                 )
                 if len(queries) < MIN_QUERIES:
                     raise QueryGenerationError(
@@ -149,7 +190,11 @@ class QueryAgent:
             "QueryAgent falling back to rule-based queries for %r",
             title,
         )
-        return self._fallback_queries(title, visual_description)
+        return self._fallback_queries(
+            title,
+            visual_description,
+            extracted_objects=extracted_objects,
+        )
 
     def generate_topic_queries(self, topic: str, count: int = 10) -> list[str]:
         """Return search queries for offline asset collection on a topic."""
@@ -346,25 +391,57 @@ class QueryAgent:
         return False
 
     @classmethod
-    def _fallback_queries(cls, title: str, visual_description: str) -> list[str]:
+    def _fallback_queries(
+        cls,
+        title: str,
+        visual_description: str,
+        *,
+        extracted_objects: Any | None = None,
+    ) -> list[str]:
         """Rule-based fallback when Ollama output is unusable."""
+        queries: list[str] = []
+        seen: set[str] = set()
+
+        if extracted_objects is not None:
+            for obj in extracted_objects.primary_objects[:MAX_QUERIES]:
+                words = obj.split()[:MAX_WORDS_PER_QUERY]
+                q = " ".join(words)
+                if q and q not in seen:
+                    seen.add(q)
+                    queries.append(q)
+            for obj in extracted_objects.mechanical_components:
+                if len(queries) >= MAX_QUERIES:
+                    break
+                words = obj.split()[:MAX_WORDS_PER_QUERY]
+                q = " ".join(words)
+                if q and q not in seen:
+                    seen.add(q)
+                    queries.append(q)
+
+        if len(queries) >= MIN_QUERIES:
+            return queries[:MAX_QUERIES]
+
         primary = keywords_from_description(visual_description, title)
         words = [w for w in primary.split() if w]
-        queries: list[str] = []
 
         if words:
-            queries.append(" ".join(words[:MAX_WORDS_PER_QUERY]))
+            q = " ".join(words[:MAX_WORDS_PER_QUERY])
+            if q not in seen:
+                queries.append(q)
+                seen.add(q)
 
         title_words = [w for w in re.sub(r"[^\w\s]", " ", title.lower()).split() if len(w) > 2]
         if title_words:
             title_query = " ".join(title_words[:MAX_WORDS_PER_QUERY])
-            if title_query not in queries:
+            if title_query not in seen:
                 queries.append(title_query)
+                seen.add(title_query)
 
         for start in range(0, len(words), MAX_WORDS_PER_QUERY):
             chunk = " ".join(words[start : start + MAX_WORDS_PER_QUERY])
-            if chunk and chunk not in queries:
+            if chunk and chunk not in seen:
                 queries.append(chunk)
+                seen.add(chunk)
             if len(queries) >= MAX_QUERIES:
                 break
 

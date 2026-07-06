@@ -43,6 +43,12 @@ from agents.session_asset_registry import SessionAssetRegistry, video_hash
 from backend.services.assets.asset_provider_manager import AssetProviderManager
 from backend.services.assets.providers.asset_provider import ProviderAsset
 from backend.services.assets.ranking import ClipRanker, RankingResult
+from backend.services.scene_understanding import (
+    ExtractedObjects,
+    ObjectExtractor,
+    ObjectExtractionError,
+    map_narration_to_scenes,
+)
 from agents.visual_asset_agent import (
     APIKeyMissingError,
     CACHE_DIR,
@@ -65,6 +71,7 @@ except ImportError:
     pass
 
 SCENES_PATH = Path("scenes/scenes.json")
+SCRIPT_PATH = Path("scripts/script.txt")
 TIMELINE_ASSETS_DIR = Path("assets/timeline")
 AUDIO_PATH = Path("audio/output.wav")
 CAPTIONS_PATH = Path("captions/output.srt")
@@ -130,6 +137,8 @@ class SceneRecord:
     selected_clip_id: str = ""
     selection_reason: str = ""
     previously_used: bool = False
+    narration_text: str = ""
+    extracted_objects: ExtractedObjects | None = None
 
     def __post_init__(self) -> None:
         if self.queries is None:
@@ -226,6 +235,7 @@ class VisualTimelineAgent:
         query_agent: QueryAgent | None = None,
         session_registry: SessionAssetRegistry | None = None,
         clip_ranker: ClipRanker | None = None,
+        object_extractor: ObjectExtractor | None = None,
     ) -> None:
         self.scenes_path = Path(scenes_path)
         self.assets_dir = Path(assets_dir)
@@ -252,6 +262,7 @@ class VisualTimelineAgent:
         self.query_agent = query_agent or QueryAgent()
         self.session_registry = session_registry or SessionAssetRegistry()
         self.clip_ranker = clip_ranker or ClipRanker()
+        self.object_extractor = object_extractor or ObjectExtractor()
         self._scene_url_queries: dict[int, dict[str, str]] = {}
         self._scenes: list[SceneRecord] = []
         self._narration_seconds = 0.0
@@ -278,7 +289,8 @@ class VisualTimelineAgent:
         self._normalize_durations()
 
         asset_started = time.perf_counter()
-        self._print_progress(2, "Generating search queries...")
+        self._print_progress(2, "Extracting objects and search queries...")
+        self._extract_scene_objects()
         self._generate_search_queries()
         self._print_progress(3, "Resolving scene assets (parallel)...")
         self._restore_from_topic_cache()
@@ -448,22 +460,54 @@ class VisualTimelineAgent:
             flush=True,
         )
 
+    def _load_narration_script(self) -> str:
+        if not SCRIPT_PATH.is_file():
+            logger.warning("Narration script not found at %s", SCRIPT_PATH)
+            return ""
+        try:
+            return SCRIPT_PATH.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.warning("Cannot read narration script: %s", exc)
+            return ""
+
+    def _extract_scene_objects(self) -> None:
+        """Identify visual objects per scene before query generation."""
+        script = self._load_narration_script()
+        narration_map = map_narration_to_scenes(script, self._scenes) if script else {}
+
+        for scene in self._scenes:
+            if scene.asset_path or scene.extracted_objects:
+                continue
+            scene.narration_text = narration_map.get(scene.scene_number, script)
+            try:
+                scene.extracted_objects = self.object_extractor.extract(
+                    scene.title,
+                    scene.visual_description,
+                    scene.narration_text,
+                )
+            except ObjectExtractionError as exc:
+                logger.warning(
+                    "Scene %d object extraction failed: %s",
+                    scene.scene_number,
+                    exc,
+                )
+                scene.extracted_objects = ExtractedObjects(
+                    primary_objects=[scene.title] if scene.title else [],
+                )
+
     def _generate_search_queries(self) -> None:
-        """Build semantic Pexels queries for each scene via QueryAgent."""
+        """Build semantic Pexels queries using extracted objects via QueryAgent."""
         for scene in self._scenes:
             if scene.asset_path or scene.queries:
                 continue
             scene.queries = self.query_agent.generate_queries(
                 scene.title,
                 scene.visual_description,
+                extracted_objects=scene.extracted_objects,
+                narration_text=scene.narration_text,
             )
             scene.query = scene.queries[0] if scene.queries else ""
-            logger.info("Scene %d title: %s", scene.scene_number, scene.title)
-            logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
-            print(
-                f"  Scene {scene.scene_number} ({scene.title}): {scene.queries}",
-                flush=True,
-            )
+            self._log_object_query_debug(scene)
 
     def _restore_from_topic_cache(self) -> None:
         if not self.topic_cache or not self.topic_cache.is_available():
@@ -757,7 +801,19 @@ class VisualTimelineAgent:
             f"query: {winner.source_query!r} | final: {winner.final:.3f}",
             flush=True,
         )
+        print(f"    Selected query: {winner.source_query!r}", flush=True)
         print(f"    Reason: {ranking.reason}", flush=True)
+
+    def _log_object_query_debug(self, scene: SceneRecord) -> None:
+        objects = scene.extracted_objects
+        object_labels = objects.summary_labels() if objects else []
+        logger.info("Scene %d title: %s", scene.scene_number, scene.title)
+        logger.info("Scene %d objects: %s", scene.scene_number, object_labels)
+        logger.info("Scene %d generated queries: %s", scene.scene_number, scene.queries)
+        print(f"\n  Scene {scene.scene_number} ({scene.title})", flush=True)
+        print(f"    Objects: {', '.join(object_labels) or '(none)'}", flush=True)
+        print(f"    Generated queries: {scene.queries}", flush=True)
+        print(f"    Selected query (initial): {scene.query!r}", flush=True)
 
     def _log_image_selection(
         self,
