@@ -7,6 +7,7 @@ from pathlib import Path
 
 LIBRARY_ROOT = Path("assets/library")
 INDEX_DIR = LIBRARY_ROOT / "index"
+TIMELINE_METADATA_DIR = LIBRARY_ROOT / "metadata"
 MASTER_INDEX_PATH = INDEX_DIR / "master_index.json"
 
 

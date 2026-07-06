@@ -101,6 +101,7 @@ class PexelsProvider(AssetProvider):
                 clip_id=clip_id,
                 source="pexels_video",
                 provider=self.name,
+                media_type="video",
                 photographer=str(user.get("name") or ""),
                 tags=tuple(t.strip() for t in query.split() if t.strip()),
             )
@@ -113,6 +114,7 @@ class PexelsProvider(AssetProvider):
                     "duration": duration,
                     "clip_id": clip_id,
                     "source": "pexels_video",
+                    "media_type": "video",
                     "photographer": candidate.photographer,
                 }
             )
@@ -140,7 +142,7 @@ class PexelsProvider(AssetProvider):
             width=asset.width,
             height=asset.height,
             duration=asset.duration,
-            media_type="video",
+            media_type=asset.media_type,
             source=asset.source,
             photographer=asset.photographer,
         )
@@ -176,6 +178,7 @@ class PexelsProvider(AssetProvider):
             clip_id=str(item.get("clip_id") or ""),
             source="pexels_video",
             provider="pexels",
+            media_type=str(item.get("media_type") or "video"),
             photographer=str(item.get("photographer") or ""),
             tags=tuple(),
         )

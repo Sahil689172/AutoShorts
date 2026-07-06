@@ -46,6 +46,7 @@ Unified candidate returned by all providers. Compatible with:
 | `download_url` | Remote file URL |
 | `clip_id` | Provider-native ID (Pexels video `id`) |
 | `width`, `height`, `duration` | Technical metadata |
+| `media_type` | `video` or `image` (library + metadata) |
 | `source` | Timeline source kind (`pexels_video`) |
 | `provider` | Provider name (`pexels`) |
 | `source_query` | Query that surfaced this asset |

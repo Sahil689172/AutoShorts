@@ -44,6 +44,7 @@ class ProviderAsset:
     clip_id: str = ""
     source: str = "pexels_video"
     provider: str = "pexels"
+    media_type: str = "video"
     photographer: str = ""
     source_query: str = ""
     tags: tuple[str, ...] = ()
@@ -57,6 +58,10 @@ class ProviderAsset:
     @property
     def is_portrait(self) -> bool:
         return self.height >= self.width
+
+    @property
+    def orientation(self) -> str:
+        return "portrait" if self.is_portrait else "landscape"
 
     @property
     def meets_minimum(self) -> bool:

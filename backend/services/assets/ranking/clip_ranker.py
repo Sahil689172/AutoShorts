@@ -167,6 +167,7 @@ def _with_source_query(candidate: ProviderAsset, source_query: str) -> ProviderA
         clip_id=candidate.clip_id,
         source=candidate.source,
         provider=candidate.provider,
+        media_type=candidate.media_type,
         photographer=candidate.photographer,
         source_query=source_query,
         tags=candidate.tags,

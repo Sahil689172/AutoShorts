@@ -105,6 +105,8 @@ assets/library/**/*
 !assets/library/index/
 !assets/library/index/master_index.json
 !assets/library/index/.gitkeep
+!assets/library/metadata/
+!assets/library/metadata/.gitkeep
 
 # Future Secrets
 

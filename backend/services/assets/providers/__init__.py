@@ -1,6 +1,5 @@
 """Remote asset providers."""
 
-from backend.services.assets.asset_provider_manager import AssetProviderManager
 from backend.services.assets.providers.asset_provider import (
     AssetProvider,
     AssetProviderMetadata,
@@ -15,7 +14,6 @@ from backend.services.assets.providers.registry import (
 
 __all__ = [
     "AssetProvider",
-    "AssetProviderManager",
     "AssetProviderMetadata",
     "PexelsProvider",
     "ProviderAsset",
