@@ -101,6 +101,10 @@ jobs/*/
 assets/cache/topics/*/
 !assets/cache/topics/.gitkeep
 !assets/session_asset_registry.json
+assets/library/**/*
+!assets/library/index/
+!assets/library/index/master_index.json
+!assets/library/index/.gitkeep
 
 # Future Secrets
 

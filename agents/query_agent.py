@@ -59,6 +59,24 @@ Visual Description:
 
 Return JSON with key "queries" containing 3-5 stock footage search strings (max 4 words each)."""
 
+COLLECTION_SYSTEM_PROMPT = """You are a stock footage librarian building a local media library.
+Given a topic, produce diverse search queries for Pexels video search.
+
+You MUST respond with one JSON object:
+{"queries": ["query one", "query two", ...]}
+
+Rules:
+- Return the requested number of queries (or close to it)
+- Each query: maximum 4 words
+- Queries must be concrete, visual, and searchable
+- Cover different aspects, settings, parts, and actions related to the topic
+- Avoid vague single-word queries
+- No markdown, no explanation, only the JSON object"""
+
+COLLECTION_USER_PROMPT_TEMPLATE = """Topic: {topic}
+
+Return JSON with key "queries" containing {count} stock footage search strings (max 4 words each).
+Include varied angles: locations, components, actions, close-ups, and workshop/context shots where relevant."""
 
 class QueryAgentError(Exception):
     """Base error for query generation."""
@@ -133,6 +151,87 @@ class QueryAgent:
         )
         return self._fallback_queries(title, visual_description)
 
+    def generate_topic_queries(self, topic: str, count: int = 10) -> list[str]:
+        """Return search queries for offline asset collection on a topic."""
+        topic = topic.strip()
+        if not topic:
+            raise QueryGenerationError("topic is empty")
+        count = max(3, min(count, 30))
+
+        description = (
+            f"Build a stock footage library for the topic {topic}. "
+            f"Include factory, assembly, components, logos, interiors, "
+            f"workshop, driving, and detail shots where relevant."
+        )
+
+        last_error: QueryGenerationError | None = None
+        for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+            try:
+                raw = self._chat(
+                    COLLECTION_SYSTEM_PROMPT,
+                    COLLECTION_USER_PROMPT_TEMPLATE.format(topic=topic, count=count),
+                    json_mode=True,
+                )
+                queries = self._parse_queries_json(raw)
+                queries = self._sanitize_queries(
+                    queries,
+                    title=topic,
+                    visual_description=description,
+                    max_queries=count,
+                )
+                if len(queries) < 3:
+                    raise QueryGenerationError(
+                        f"Too few topic queries after sanitization ({len(queries)})"
+                    )
+                logger.info(
+                    "QueryAgent produced %d topic queries for %r",
+                    len(queries),
+                    topic,
+                )
+                return queries[:count]
+            except QueryGenerationError as exc:
+                last_error = exc
+                logger.warning(
+                    "Topic query generation attempt %d/%d failed for %r: %s",
+                    attempt,
+                    MAX_GENERATION_ATTEMPTS,
+                    topic,
+                    exc,
+                )
+
+        logger.warning("QueryAgent falling back to rule-based topic queries for %r", topic)
+        return self._fallback_topic_queries(topic, count)
+
+    @classmethod
+    def _fallback_topic_queries(cls, topic: str, count: int) -> list[str]:
+        """Rule-based topic queries when Ollama is unavailable."""
+        base = topic.strip().lower()
+        suffixes = [
+            "factory",
+            "assembly",
+            "engine",
+            "logo",
+            "interior",
+            "exhaust",
+            "workshop",
+            "driving",
+            "close up",
+            "detail",
+            "manufacturing",
+            "showroom",
+        ]
+        queries: list[str] = []
+        seen: set[str] = set()
+        for suffix in suffixes:
+            words = f"{base} {suffix}".split()
+            q = " ".join(words[:MAX_WORDS_PER_QUERY])
+            if q not in seen:
+                seen.add(q)
+                queries.append(q)
+            if len(queries) >= count:
+                break
+        return queries[:count]
+
     def _chat(self, system: str, user: str, json_mode: bool = False) -> str:
         chat_kwargs: dict[str, Any] = {
             "model": self.model,
@@ -205,6 +304,7 @@ class QueryAgent:
         *,
         title: str,
         visual_description: str,
+        max_queries: int = MAX_QUERIES,
     ) -> list[str]:
         context = f"{title} {visual_description}".lower()
         cleaned: list[str] = []
@@ -234,7 +334,7 @@ class QueryAgent:
                 if len(cleaned) >= MIN_QUERIES:
                     break
 
-        return cleaned[:MAX_QUERIES]
+        return cleaned[:max_queries]
 
     @staticmethod
     def _is_too_generic(query: str, context: str) -> bool:
