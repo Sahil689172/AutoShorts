@@ -10,13 +10,23 @@ Usage (from project root):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-# Must match backend/services/clip_intelligence/florence_provider.py
-DEFAULT_MODEL_ID = "microsoft/Florence-2-large"
+# Kept standalone (no AutoShorts imports) but mirrors the VISION_MODEL config
+# in backend/services/clip_intelligence/config.py so both resolve identically.
+DEFAULT_VISION_MODEL = "microsoft/Florence-2-base"
+
+
+def _configured_model() -> str:
+    configured = os.environ.get("VISION_MODEL", "").strip()
+    return configured or DEFAULT_VISION_MODEL
+
+
+DEFAULT_MODEL_ID = _configured_model()
 
 
 def _parse_args() -> argparse.Namespace:

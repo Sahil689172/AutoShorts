@@ -9,6 +9,8 @@ from typing import Any
 
 from PIL import Image
 
+from backend.services.clip_intelligence.config import get_vision_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,11 +33,12 @@ class FlorenceProvider:
 
     def __init__(
         self,
-        model_id: str = "microsoft/Florence-2-large",
+        model_id: str | None = None,
         *,
         device: str | None = None,
     ) -> None:
-        self.model_id = model_id
+        # Single configuration point: defaults to VISION_MODEL config.
+        self.model_id = model_id or get_vision_model()
         self._device_override = device
         self._loaded = False
         self._model: Any = None
@@ -47,6 +50,7 @@ class FlorenceProvider:
         if self._loaded:
             return
         started = time.perf_counter()
+        logger.info("Vision Model: %s", self.model_id)
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoProcessor

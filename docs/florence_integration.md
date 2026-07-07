@@ -41,6 +41,70 @@ Notes:
 
 - Florence outputs are post-processed via the Florence processor.
 - Florence doesn’t always provide calibrated per-object scores; `confidence` is a **deterministic heuristic** used for now.
+- The model id comes from a single configuration point (see below); it is **not** hardcoded in the provider.
+
+---
+
+## Vision model configuration (Phase 3.6D)
+
+The vision model is defined in **one place**:
+
+`backend/services/clip_intelligence/config.py`
+
+```python
+DEFAULT_VISION_MODEL = "microsoft/Florence-2-base"
+VISION_MODEL_ENV = "VISION_MODEL"
+```
+
+Resolution order:
+
+1. `VISION_MODEL` environment variable (if set)
+2. `DEFAULT_VISION_MODEL` (`microsoft/Florence-2-base`)
+
+On first analysis the provider logs a startup line:
+
+```
+Vision Model: microsoft/Florence-2-base
+```
+
+### Why Base is the default
+
+- **Faster CPU inference** — Florence-2 Base (~0.23B params) runs roughly 2–3× faster than Large (~0.77B) on CPU, which is the common AutoShorts environment.
+- **Lower memory** — Base loads with a smaller footprint, reducing the chance of OOM during collection.
+- **Caption quality is sufficient** — For short-form clip tagging (captions + object labels used for future retrieval), Base produces adequate descriptions; the marginal quality gain from Large does not justify the CPU cost at collection time.
+
+### How to switch to Large
+
+Set the environment variable — no code changes:
+
+```bash
+# Windows (PowerShell)
+$env:VISION_MODEL = "microsoft/Florence-2-large"
+
+# macOS / Linux
+export VISION_MODEL=microsoft/Florence-2-large
+```
+
+Or add it to your `.env` file:
+
+```
+VISION_MODEL=microsoft/Florence-2-large
+```
+
+The same variable is honored by `tools/test_florence.py`, so smoke tests use the same model as the pipeline. You can still override per run:
+
+```bash
+python tools/test_florence.py image.jpg --model microsoft/Florence-2-large
+```
+
+### Expected performance differences
+
+| Model | Params | Relative CPU speed | Caption quality | Default |
+|-------|--------|--------------------|-----------------|---------|
+| `microsoft/Florence-2-base` | ~0.23B | Faster (baseline) | Good for tagging | ✅ |
+| `microsoft/Florence-2-large` | ~0.77B | ~2–3× slower on CPU | Higher detail | Opt-in |
+
+Exact timings depend on CPU, clip length, and shot count (one Florence pass per detected shot).
 
 ### `backend/services/clip_intelligence/keyframe_extractor.py`
 
@@ -89,6 +153,12 @@ Backward compatibility:
 ---
 
 ## Logging
+
+On first load the provider logs the active model:
+
+```
+Vision Model: microsoft/Florence-2-base
+```
 
 The analyzer logs (best-effort):
 
