@@ -43,6 +43,12 @@ from agents.session_asset_registry import SessionAssetRegistry, video_hash
 from backend.services.assets.asset_provider_manager import AssetProviderManager
 from backend.services.assets.providers.asset_provider import ProviderAsset
 from backend.services.assets.ranking import ClipRanker, RankingResult
+from backend.services.clip_intelligence.metadata_store import MetadataStore
+from backend.services.clip_intelligence.segment_selector import (
+    TrimSelection,
+    select_trim_window,
+    tokenize,
+)
 from backend.services.scene_understanding import (
     ExtractedObjects,
     ObjectExtractor,
@@ -263,6 +269,7 @@ class VisualTimelineAgent:
         self.session_registry = session_registry or SessionAssetRegistry()
         self.clip_ranker = clip_ranker or ClipRanker()
         self.object_extractor = object_extractor or ObjectExtractor()
+        self.timeline_metadata_store = MetadataStore()
         self._scene_url_queries: dict[int, dict[str, str]] = {}
         self._scenes: list[SceneRecord] = []
         self._narration_seconds = 0.0
@@ -967,9 +974,14 @@ class VisualTimelineAgent:
             f"crop={w}:{h},"
             f"setsar=1,fps={fps}"
         )
-        command = [
-            self.ffmpeg,
-            "-y",
+
+        trim_start = self._resolve_trim_start(scene)
+
+        command = [self.ffmpeg, "-y"]
+        if trim_start > 0:
+            # Seek before -i for fast, low-overhead trimming (re-encode follows).
+            command += ["-ss", f"{trim_start:.3f}"]
+        command += [
             "-i",
             str(scene.asset_path.resolve()),
             "-vf",
@@ -986,12 +998,112 @@ class VisualTimelineAgent:
             str(output_path),
         ]
         logger.info(
-            "Trimming scene %d video to %.2fs: %s",
+            "Trimming scene %d video to %.2fs from %.2fs: %s",
             scene.scene_number,
             scene.duration_seconds,
+            trim_start,
             scene.asset_path.name,
         )
         self._run_ffmpeg(command, f"video segment {scene.scene_number}")
+
+    def _resolve_trim_start(self, scene: SceneRecord) -> float:
+        """Pick a trim start from Florence timeline metadata (Phase 3.7).
+
+        Falls back to 0.0 (current trim-from-start behavior) whenever timeline
+        metadata is missing, empty, or all-placeholder.
+        """
+        assert scene.asset_path is not None
+        try:
+            clip_duration = probe_duration(scene.asset_path, self.ffprobe)
+        except Exception as exc:
+            logger.debug("Scene %d: cannot probe clip duration: %s", scene.scene_number, exc)
+            return 0.0
+
+        selection = None
+        try:
+            selection = select_trim_window(
+                clip_id_candidates=self._timeline_clip_id_candidates(scene),
+                clip_duration=clip_duration,
+                narration_duration=scene.duration_seconds,
+                scene_tokens=self._scene_tokens(scene),
+                metadata_store=self.timeline_metadata_store,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Scene %d: timeline segment selection failed: %s",
+                scene.scene_number,
+                exc,
+            )
+            return 0.0
+
+        if selection is None:
+            logger.info(
+                "Scene %d: no timeline metadata; trimming from start (fallback)",
+                scene.scene_number,
+            )
+            return 0.0
+
+        self._log_trim_selection(scene, selection)
+        return max(0.0, selection.trim_start)
+
+    def _timeline_clip_id_candidates(self, scene: SceneRecord) -> list[str]:
+        """Clip id forms that may key the timeline metadata file."""
+        candidates: list[str] = []
+        clip_id = (scene.selected_clip_id or "").strip()
+        provider = (scene.source or "").split("_")[0] if scene.source else ""
+        if clip_id:
+            candidates.append(clip_id)
+            if provider and not clip_id.startswith(f"{provider}_"):
+                candidates.append(f"{provider}_{clip_id}")
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique: list[str] = []
+        for c in candidates:
+            if c and c not in seen:
+                seen.add(c)
+                unique.append(c)
+        return unique
+
+    def _scene_tokens(self, scene: SceneRecord) -> set[str]:
+        parts = [scene.title, scene.visual_description]
+        parts.extend(scene.queries or [])
+        if scene.query:
+            parts.append(scene.query)
+        if scene.extracted_objects:
+            parts.extend(scene.extracted_objects.summary_labels())
+        tokens: set[str] = set()
+        for part in parts:
+            tokens |= tokenize(part)
+        return tokens
+
+    def _log_trim_selection(self, scene: SceneRecord, selection: TrimSelection) -> None:
+        seg = selection.segment
+        clip_label = scene.selected_clip_id or scene.selected_asset_url or "?"
+        logger.info(
+            "Scene %d timeline trim: clip=%s segment=%d/%d [%.2f-%.2f] "
+            "trim=[%.2f-%.2f] score=%.3f reason=%s",
+            scene.scene_number,
+            clip_label,
+            selection.segment_index + 1,
+            selection.segment_count,
+            seg.start,
+            seg.end,
+            selection.trim_start,
+            selection.trim_end,
+            selection.score,
+            selection.reason,
+        )
+        print(f"  Scene {scene.scene_number} | timeline-based trim", flush=True)
+        print(f"    Selected clip:    {clip_label}", flush=True)
+        print(
+            f"    Timeline segment: {selection.segment_index + 1}/{selection.segment_count} "
+            f"[{seg.start:.2f}s–{seg.end:.2f}s] {seg.description!r}",
+            flush=True,
+        )
+        print(f"    Trim start:       {selection.trim_start:.2f}s", flush=True)
+        print(f"    Trim end:         {selection.trim_end:.2f}s", flush=True)
+        print(f"    Reason:           {selection.reason}", flush=True)
+        print(f"    Similarity score: {selection.score:.3f}", flush=True)
 
     def _render_image_segment(self, scene: SceneRecord, output_path: Path) -> None:
         assert scene.asset_path is not None
