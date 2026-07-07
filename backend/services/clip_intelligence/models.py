@@ -11,20 +11,29 @@ from typing import Any
 class TimelineSegment:
     """A time-bounded description of clip content."""
 
-    start_time: float
-    end_time: float
+    start: float
+    end: float
     description: str = "Unknown"
     objects: list[str] = field(default_factory=list)
     confidence: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
+        # Phase 3.6 format requirement:
+        # {"start": ..., "end": ..., "description": ..., "objects": [...], "confidence": ...}
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TimelineSegment:
+        # Backward compatible with Phase 3.5 keys: start_time/end_time
+        start = data.get("start")
+        end = data.get("end")
+        if start is None:
+            start = data.get("start_time")
+        if end is None:
+            end = data.get("end_time")
         return cls(
-            start_time=float(data.get("start_time") or 0),
-            end_time=float(data.get("end_time") or 0),
+            start=float(start or 0),
+            end=float(end or 0),
             description=str(data.get("description") or "Unknown"),
             objects=list(data.get("objects") or []),
             confidence=float(data.get("confidence") or 0),

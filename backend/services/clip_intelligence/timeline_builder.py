@@ -13,8 +13,8 @@ class TimelineBuilder:
         safe_duration = max(0.0, float(duration))
         return [
             TimelineSegment(
-                start_time=0.0,
-                end_time=safe_duration,
+                start=0.0,
+                end=safe_duration,
                 description="Unknown",
                 objects=[],
                 confidence=0.0,
@@ -41,8 +41,8 @@ class TimelineBuilder:
             end = min(start + segment_length, duration)
             segments.append(
                 TimelineSegment(
-                    start_time=start,
-                    end_time=end,
+                    start=start,
+                    end=end,
                     description="Unknown",
                     objects=[],
                     confidence=0.0,
