@@ -282,6 +282,8 @@ class VisualTimelineAgent:
         self.clip_ranker = clip_ranker or ClipRanker()
         self.object_extractor = object_extractor or ObjectExtractor()
         self.timeline_metadata_store = MetadataStore()
+        # Per-scene diagnostics for asset search failures/summaries (Phase 3.7F).
+        self._scene_search_diagnostics: dict[int, dict[str, Any]] = {}
         self._scene_url_queries: dict[int, dict[str, str]] = {}
         self._scenes: list[SceneRecord] = []
         self._narration_seconds = 0.0
@@ -588,10 +590,13 @@ class VisualTimelineAgent:
                     if scene.asset_path or scene.pending_url:
                         continue
                     pool = pools.get(scene.scene_number, [])
-                    if pool:
-                        self._select_video_from_pool(scene, pool)
-                    if not scene.pending_url:
-                        self._resolve_image_fallback(scene)
+                if pool:
+                    self._select_video_from_pool(scene, pool)
+                if not scene.pending_url:
+                    self._resolve_image_fallback(scene)
+                if not scene.pending_url and not scene.asset_path:
+                    # No video selection and no image fallback → print diagnostics.
+                    self._print_scene_search_diagnostics(scene)
             finally:
                 profiler.end(AGENT_ASSET_SEARCH)
 
@@ -621,6 +626,16 @@ class VisualTimelineAgent:
         """Search every query and merge into one deduplicated candidate pool."""
         queries = scene.queries or ([scene.query] if scene.query else [])
         if not queries or not self.provider_manager.is_configured():
+            self._scene_search_diagnostics[scene.scene_number] = {
+                "title": scene.title,
+                "objects": (scene.extracted_objects.summary_labels() if scene.extracted_objects else []),
+                "queries": queries,
+                "results_per_query": {q: 0 for q in queries},
+                "raw_total": 0,
+                "pool_size": 0,
+                "duplicate_count": 0,
+                "failure_reason": "Provider manager not configured or no queries",
+            }
             return []
 
         query_results: dict[str, list[VideoCandidate]] = {}
@@ -662,6 +677,15 @@ class VisualTimelineAgent:
         pool, stats = merge_query_results(query_results)
         self._scene_url_queries[scene.scene_number] = url_to_query
         self._log_candidate_pool(scene, stats)
+        self._scene_search_diagnostics[scene.scene_number] = {
+            "title": scene.title,
+            "objects": (scene.extracted_objects.summary_labels() if scene.extracted_objects else []),
+            "queries": queries,
+            "results_per_query": dict(stats.results_per_query),
+            "raw_total": stats.raw_total,
+            "pool_size": stats.pool_size,
+            "duplicate_count": stats.duplicate_count,
+        }
         return pool
 
     def _select_video_from_pool(
@@ -684,6 +708,7 @@ class VisualTimelineAgent:
         )
         profiler.end(AGENT_CLIP_RANKING)
         if ranking is None:
+            self._print_scene_search_diagnostics(scene, failure_reason="ClipRanker returned no winner")
             return
 
         winner = ranking.winner
@@ -706,6 +731,85 @@ class VisualTimelineAgent:
             scene.scene_number,
         )
         self._log_scene_selection(scene, ranking)
+        self._print_scene_search_diagnostics(scene, ranking=ranking)
+
+    def _print_scene_search_diagnostics(
+        self,
+        scene: SceneRecord,
+        *,
+        ranking: RankingResult | None = None,
+        failure_reason: str | None = None,
+    ) -> None:
+        """
+        Print a high-signal, per-scene diagnostics block for asset search.
+
+        Does not change any search logic; intended to make failures debuggable without reading code.
+        """
+        diag = self._scene_search_diagnostics.get(scene.scene_number, {})
+        title = diag.get("title") or scene.title
+        objects = diag.get("objects") or (scene.extracted_objects.summary_labels() if scene.extracted_objects else [])
+        queries = diag.get("queries") or (scene.queries or ([scene.query] if scene.query else []))
+        results_per_query: dict[str, int] = dict(diag.get("results_per_query") or {})
+        raw_total = int(diag.get("raw_total") or sum(results_per_query.values()) or 0)
+        pool_size = int(diag.get("pool_size") or 0)
+        dupes = int(diag.get("duplicate_count") or 0)
+        after_dedup = pool_size
+        after_ranking = len(ranking.ranked) if ranking else 0
+
+        if failure_reason is None:
+            if diag.get("failure_reason"):
+                failure_reason = str(diag["failure_reason"])
+            elif not queries:
+                failure_reason = "No queries generated"
+            elif raw_total == 0:
+                failure_reason = "No API results"
+            elif after_dedup == 0 and raw_total > 0:
+                failure_reason = "All results removed by deduplication"
+            elif ranking is None:
+                failure_reason = "Filtered by ranking or no eligible candidates"
+
+        print("\n" + "=" * 49, flush=True)
+        print(f"Scene {scene.scene_number}", flush=True)
+        print("", flush=True)
+        print("Title:", flush=True)
+        print(f"{title}", flush=True)
+        print("", flush=True)
+        print("Objects:", flush=True)
+        if objects:
+            for obj in objects:
+                print(f"{obj}", flush=True)
+        else:
+            print("(none)", flush=True)
+        print("", flush=True)
+        print("Generated Queries:", flush=True)
+        if not queries:
+            print("(none)", flush=True)
+        else:
+            for i, q in enumerate(queries, start=1):
+                results = results_per_query.get(q, 0)
+                print(f"{i}.", flush=True)
+                print(f"{q}", flush=True)
+                print("", flush=True)
+                print("Results:", flush=True)
+                print(f"{results}", flush=True)
+                print("", flush=True)
+
+        print(f"Candidate Pool: {raw_total}", flush=True)
+        print(f"After Dedup: {after_dedup} (removed {dupes})", flush=True)
+        if ranking is not None:
+            print(f"After Ranking: {after_ranking}", flush=True)
+            print("", flush=True)
+            print("Winning Clip:", flush=True)
+            print(f"{ranking.winner.clip_label}", flush=True)
+            print("", flush=True)
+            print("Reason:", flush=True)
+            print(f"{ranking.reason}", flush=True)
+        else:
+            print(f"After Ranking: 0", flush=True)
+            print("", flush=True)
+            print("Failure reason:", flush=True)
+            print(f"{failure_reason or 'Unknown'}", flush=True)
+        print("=" * 49, flush=True)
 
     def _resolve_image_fallback(self, scene: SceneRecord) -> None:
         """Image/Pixabay fallback when no suitable video candidate is selected."""
@@ -904,6 +1008,11 @@ class VisualTimelineAgent:
             )
         except (TimelineAssetError, OSError) as exc:
             logger.error("Scene %d download failed: %s", scene.scene_number, exc)
+            # Print a diagnostics block that includes the failure cause.
+            self._print_scene_search_diagnostics(
+                scene,
+                failure_reason=f"Download failure: {exc}",
+            )
             scene.asset_path = None
             scene.asset_kind = None
             scene.source = None
