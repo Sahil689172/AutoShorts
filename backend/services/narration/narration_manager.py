@@ -8,6 +8,7 @@ from pathlib import Path
 
 from backend.services.narration.exceptions import NarrationError, NarratorNotFoundError, ScriptNotFoundError
 from backend.services.narration.narrator_provider import NarratorProvider
+from backend.services.narration.narration_sanitizer import NarrationSanitizer
 from backend.services.narration.text_utils import prepare_narration_text
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,21 @@ class NarrationManager:
 
         self._print_progress(4, f"Generating narration ({self.provider.name})...")
         narration = prepare_narration_text(script_text)
+        sanitizer = NarrationSanitizer()
+        sanitized = sanitizer.sanitize(narration)
+        if self.provider.name == "kokoro":
+            dbg = sanitizer.debug_stats(narration, sanitized, max_chunk_chars=400)
+            for line in dbg.format_lines():
+                print(line, flush=True)
+            logger.info(
+                "NarrationSanitizer stats: before=%d after=%d sentences=%d chunks=%d longest_chunk=%d",
+                dbg.characters_before,
+                dbg.characters_after,
+                dbg.sentence_count,
+                dbg.chunk_count,
+                dbg.longest_chunk,
+            )
+        narration = sanitized
         audio_path = self.provider.generate_audio(narration, str(self.output_path))
 
         self._print_progress(5, "Verifying output audio...")
