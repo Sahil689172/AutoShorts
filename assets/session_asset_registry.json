@@ -1,54 +1,47 @@
 {
-  "session_started_at": "2026-07-08T08:54:53.952054+00:00",
+  "session_started_at": "2026-07-08T14:03:31.965753+00:00",
   "assets": [
     {
-      "clip_id": "5638360",
+      "clip_id": "35403186",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/5638360/5638360-uhd_2160_3840_25fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/35403186/14999987_1080_1920_30fps.mp4",
       "scene_number": 1,
-      "video_hash": "cdf8941d13f9aee7"
+      "video_hash": "2300ed8c9ff0c65b"
     },
     {
-      "clip_id": "9757159",
+      "clip_id": "9724050",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/9757159/9757159-uhd_2160_3840_24fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/9724050/9724050-uhd_2160_3840_24fps.mp4",
       "scene_number": 2,
-      "video_hash": "bb74fd5cc3e96414"
+      "video_hash": "d1e5e9e728e1ee59"
     },
     {
-      "clip_id": "37111149",
+      "clip_id": "18104089",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/37111149/15721122_1440_2560_25fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/18104089/18104089-uhd_2160_3840_30fps.mp4",
       "scene_number": 3,
-      "video_hash": "19dcb8d3178b4083"
+      "video_hash": "67032a625978d6ea"
     },
     {
-      "clip_id": "35078285",
+      "clip_id": "8993955",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/35078285/14859813_2160_3840_30fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/8993955/8993955-uhd_2160_3840_25fps.mp4",
       "scene_number": 4,
-      "video_hash": "a5bb6a8364ff6104"
+      "video_hash": "c02c45e9376d46e2"
     },
     {
-      "clip_id": "35078288",
+      "clip_id": "38122512",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/35078288/14859835_2160_3840_30fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/38122512/16186168_2160_3840_30fps.mp4",
       "scene_number": 5,
-      "video_hash": "334f95d294044891"
+      "video_hash": "5002cee9f9c5c15a"
     },
     {
-      "clip_id": "36957971",
+      "clip_id": "36747850",
       "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/36957971/15657757_2160_3840_60fps.mp4",
+      "download_url": "https://videos.pexels.com/video-files/36747850/15573845_2160_3840_60fps.mp4",
       "scene_number": 6,
-      "video_hash": "68de8ec1df64edc1"
-    },
-    {
-      "clip_id": "37435947",
-      "source": "pexels_video",
-      "download_url": "https://videos.pexels.com/video-files/37435947/15855282_1440_2560_30fps.mp4",
-      "scene_number": 7,
-      "video_hash": "5616f616a656899d"
+      "video_hash": "3010863783ab76aa"
     }
   ]
 }

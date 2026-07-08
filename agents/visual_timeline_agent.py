@@ -590,13 +590,13 @@ class VisualTimelineAgent:
                     if scene.asset_path or scene.pending_url:
                         continue
                     pool = pools.get(scene.scene_number, [])
-                if pool:
-                    self._select_video_from_pool(scene, pool)
-                if not scene.pending_url:
-                    self._resolve_image_fallback(scene)
-                if not scene.pending_url and not scene.asset_path:
-                    # No video selection and no image fallback → print diagnostics.
-                    self._print_scene_search_diagnostics(scene)
+                    if pool:
+                        self._select_video_from_pool(scene, pool)
+                    if not scene.pending_url:
+                        self._resolve_image_fallback(scene)
+                    if not scene.pending_url and not scene.asset_path:
+                        # No video selection and no image fallback → print diagnostics.
+                        self._print_scene_search_diagnostics(scene)
             finally:
                 profiler.end(AGENT_ASSET_SEARCH)
 
