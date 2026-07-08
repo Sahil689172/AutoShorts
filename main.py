@@ -52,6 +52,15 @@ from script_generator import (
 )
 from backend.services.narration.exceptions import NarrationError, NarratorNotFoundError, ScriptNotFoundError
 from voice_generator import VoiceGenerator
+from backend.services.profiler import (
+    AGENT_CAPTION_GENERATOR,
+    AGENT_ENTIRE_PIPELINE,
+    AGENT_SCENE_AGENT,
+    AGENT_SCRIPT_GENERATOR,
+    get_profiler,
+    narrator_agent_name,
+    reset_profiler,
+)
 from pipeline_timing import (
     PHASE_CAPTIONS,
     PHASE_METADATA,
@@ -86,6 +95,8 @@ def main() -> int:
         return 1
 
     timer = PipelineTimer()
+    profiler = reset_profiler()
+    profiler.start(AGENT_ENTIRE_PIPELINE)
     from pipeline_timing import log_optimization_banner
 
     log_optimization_banner()
@@ -96,7 +107,7 @@ def main() -> int:
     scene_agent = SceneAgent()
     visual_timeline_agent = VisualTimelineAgent(topic=topic, timer=timer)
     try:
-        with timer.track(PHASE_SCRIPT_GENERATION):
+        with timer.track(PHASE_SCRIPT_GENERATION), profiler.track(AGENT_SCRIPT_GENERATOR):
             logger.info("Phase 1: generating script")
             script, raw_path, formatted_path = script_generator.generate_and_save(topic)
     except OllamaConnectionError as exc:
@@ -147,7 +158,7 @@ def main() -> int:
     print(f"  Title preview: {metadata.title}")
 
     try:
-        with timer.track(PHASE_VOICE):
+        with timer.track(PHASE_VOICE), profiler.track(narrator_agent_name()):
             logger.info("Phase 2: generating voice narration")
             print("\nPhase 2 — Voice generation")
             audio_path = voice_generator.generate()
@@ -164,7 +175,7 @@ def main() -> int:
     print(f"\nVoice saved -> {audio_path}")
 
     try:
-        with timer.track(PHASE_CAPTIONS):
+        with timer.track(PHASE_CAPTIONS), profiler.track(AGENT_CAPTION_GENERATOR):
             logger.info("Phase 3: generating captions")
             print("\nPhase 3 — Caption generation")
             srt_path = caption_generator.generate()
@@ -190,7 +201,7 @@ def main() -> int:
     print(f"\nCaptions saved -> {srt_path}")
 
     try:
-        with timer.track(PHASE_SCENES):
+        with timer.track(PHASE_SCENES), profiler.track(AGENT_SCENE_AGENT):
             logger.info("Phase 4.5A: generating visual scenes")
             print("\nPhase 4.5A — Scene Agent")
             _, scenes_path = scene_agent.generate()
@@ -252,6 +263,9 @@ def main() -> int:
     )
 
     timer.log_summary()
+    profiler.end(AGENT_ENTIRE_PIPELINE)
+    profiler.summary()
+    profiler.save_json()
     return 0
 
 

@@ -9,6 +9,15 @@ from typing import Callable
 
 from backend.job_manager import JobManager, JobResult
 from backend.logging_config import phase_logger
+from backend.services.profiler import (
+    AGENT_CAPTION_GENERATOR,
+    AGENT_ENTIRE_PIPELINE,
+    AGENT_SCENE_AGENT,
+    AGENT_SCRIPT_GENERATOR,
+    get_profiler,
+    narrator_agent_name,
+    reset_profiler,
+)
 from pipeline_timing import (
     PHASE_CAPTIONS,
     PHASE_FINALIZATION,
@@ -24,6 +33,26 @@ from pipeline_timing import (
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger(__name__)
+
+
+def _profiler_name_for_phase(label: str) -> str | None:
+    """Map pipeline_timing labels to profiler agent names."""
+    from pipeline_timing import (
+        PHASE_CAPTIONS,
+        PHASE_SCENES,
+        PHASE_SCRIPT_GENERATION,
+        PHASE_SCRIPT_PREPARATION,
+        PHASE_VOICE,
+    )
+
+    mapping = {
+        PHASE_SCRIPT_GENERATION: AGENT_SCRIPT_GENERATOR,
+        PHASE_SCRIPT_PREPARATION: AGENT_SCRIPT_GENERATOR,
+        PHASE_VOICE: narrator_agent_name(),
+        PHASE_CAPTIONS: AGENT_CAPTION_GENERATOR,
+        PHASE_SCENES: AGENT_SCENE_AGENT,
+    }
+    return mapping.get(label)
 
 
 class PipelineError(Exception):
@@ -43,6 +72,8 @@ def run_job(job_id: str, job_manager: JobManager) -> None:
     os.chdir(ROOT_DIR)
 
     timer = PipelineTimer()
+    profiler = reset_profiler()
+    profiler.start(AGENT_ENTIRE_PIPELINE)
     log_optimization_banner()
 
     if job.mode == "topic":
@@ -56,6 +87,9 @@ def run_job(job_id: str, job_manager: JobManager) -> None:
     if job:
         job_manager.update_performance(job_id, timer)
     timer.log_summary()
+    profiler.end(AGENT_ENTIRE_PIPELINE)
+    profiler.summary()
+    profiler.save_json()
 
 
 def _run_topic_pipeline(
@@ -72,9 +106,17 @@ def _run_topic_pipeline(
         jm.start_phase(job_id, phase, completed)
         log = phase_logger(__name__, job_id, phase)
         log.info("Started", extra={"event": "started", "perf_label": label})
+        profiler = get_profiler()
+        profiler_name = _profiler_name_for_phase(label)
         try:
-            if track:
+            if track and profiler_name:
+                with timer.track(label), profiler.track(profiler_name):
+                    fn()
+            elif track:
                 with timer.track(label):
+                    fn()
+            elif profiler_name:
+                with profiler.track(profiler_name):
                     fn()
             else:
                 fn()
@@ -134,9 +176,17 @@ def _run_script_pipeline(
         jm.start_phase(job_id, phase, completed)
         log = phase_logger(__name__, job_id, phase)
         log.info("Started", extra={"event": "started", "perf_label": label})
+        profiler = get_profiler()
+        profiler_name = _profiler_name_for_phase(label)
         try:
-            if track:
+            if track and profiler_name:
+                with timer.track(label), profiler.track(profiler_name):
+                    fn()
+            elif track:
                 with timer.track(label):
+                    fn()
+            elif profiler_name:
+                with profiler.track(profiler_name):
                     fn()
             else:
                 fn()

@@ -11,6 +11,11 @@ from dataclasses import dataclass
 
 from backend.services.clip_intelligence.metadata_store import MetadataStore
 from backend.services.clip_intelligence.models import TimelineSegment
+from backend.services.profiler.pipeline_profiler import (
+    AGENT_TIMELINE_METADATA,
+    AGENT_TIMESTAMP_SELECTION,
+    get_profiler,
+)
 
 
 def tokenize(text: str) -> set[str]:
@@ -104,8 +109,10 @@ def select_trim_window(
     signalling the caller to fall back to current trim-from-start behavior.
     """
     store = metadata_store or MetadataStore()
+    profiler = get_profiler()
 
     segments: list[TimelineSegment] | None = None
+    profiler.start(AGENT_TIMELINE_METADATA)
     for clip_id in clip_id_candidates:
         if not clip_id:
             continue
@@ -113,49 +120,54 @@ def select_trim_window(
         if loaded:
             segments = loaded
             break
+    profiler.end(AGENT_TIMELINE_METADATA)
 
     if not segments:
         return None
 
-    # Treat all-placeholder metadata as "no information" → fallback.
-    meaningful = [
-        s
-        for s in segments
-        if (s.description and s.description != "Unknown") or s.objects
-    ]
-    if not meaningful:
-        return None
+    profiler.start(AGENT_TIMESTAMP_SELECTION)
+    try:
+        # Treat all-placeholder metadata as "no information" → fallback.
+        meaningful = [
+            s
+            for s in segments
+            if (s.description and s.description != "Unknown") or s.objects
+        ]
+        if not meaningful:
+            return None
 
-    best_index = 0
-    best_score = -1.0
-    for i, segment in enumerate(segments):
-        score = _score_segment(segment, scene_tokens)
-        if score > best_score:
-            best_score = score
-            best_index = i
+        best_index = 0
+        best_score = -1.0
+        for i, segment in enumerate(segments):
+            score = _score_segment(segment, scene_tokens)
+            if score > best_score:
+                best_score = score
+                best_index = i
 
-    best = segments[best_index]
-
-    # If nothing matched at all, still center on the highest-confidence segment.
-    reason_prefix = ""
-    if best_score <= 0.0:
-        best_index = max(
-            range(len(segments)),
-            key=lambda i: segments[i].confidence,
-        )
         best = segments[best_index]
-        reason_prefix = "no query/object match; highest-confidence segment; "
 
-    trim_start, trim_end, window_reason = _compute_trim_window(
-        best, clip_duration, narration_duration
-    )
+        # If nothing matched at all, still center on the highest-confidence segment.
+        reason_prefix = ""
+        if best_score <= 0.0:
+            best_index = max(
+                range(len(segments)),
+                key=lambda i: segments[i].confidence,
+            )
+            best = segments[best_index]
+            reason_prefix = "no query/object match; highest-confidence segment; "
 
-    return TrimSelection(
-        segment=best,
-        segment_index=best_index,
-        segment_count=len(segments),
-        trim_start=trim_start,
-        trim_end=trim_end,
-        score=max(0.0, best_score),
-        reason=reason_prefix + window_reason,
-    )
+        trim_start, trim_end, window_reason = _compute_trim_window(
+            best, clip_duration, narration_duration
+        )
+
+        return TrimSelection(
+            segment=best,
+            segment_index=best_index,
+            segment_count=len(segments),
+            trim_start=trim_start,
+            trim_end=trim_end,
+            score=max(0.0, best_score),
+            reason=reason_prefix + window_reason,
+        )
+    finally:
+        profiler.end(AGENT_TIMESTAMP_SELECTION)

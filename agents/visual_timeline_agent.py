@@ -49,6 +49,18 @@ from backend.services.clip_intelligence.segment_selector import (
     select_trim_window,
     tokenize,
 )
+from backend.services.profiler import (
+    AGENT_ASSET_DOWNLOAD,
+    AGENT_ASSET_SEARCH,
+    AGENT_CLIP_RANKING,
+    AGENT_FFMPEG_RENDERING,
+    AGENT_OBJECT_EXTRACTION,
+    AGENT_PROVIDER_MANAGER,
+    AGENT_QUERY_AGENT,
+    AGENT_SUBTITLE_BURN,
+    AGENT_VIDEO_EXPORT,
+    get_profiler,
+)
 from backend.services.scene_understanding import (
     ExtractedObjects,
     ObjectExtractor,
@@ -297,8 +309,11 @@ class VisualTimelineAgent:
 
         asset_started = time.perf_counter()
         self._print_progress(2, "Extracting objects and search queries...")
-        self._extract_scene_objects()
-        self._generate_search_queries()
+        profiler = get_profiler()
+        with profiler.track(AGENT_OBJECT_EXTRACTION):
+            self._extract_scene_objects()
+        with profiler.track(AGENT_QUERY_AGENT):
+            self._generate_search_queries()
         self._print_progress(3, "Resolving scene assets (parallel)...")
         self._restore_from_topic_cache()
         self._search_and_download_assets_parallel()
@@ -320,9 +335,11 @@ class VisualTimelineAgent:
         try:
             video_started = time.perf_counter()
             self._print_progress(5, "Applying motion...")
+            profiler = get_profiler()
+            profiler.start(AGENT_FFMPEG_RENDERING)
             segment_paths = self._render_timeline_segments()
-
             visual_path = self._concat_segments(segment_paths)
+            profiler.end(AGENT_FFMPEG_RENDERING)
 
             self._print_progress(6, "Adding narration...")
             self._print_progress(7, "Adding captions...")
@@ -544,34 +561,39 @@ class VisualTimelineAgent:
     def _search_and_download_assets_parallel(self) -> None:
         needs_search = [s for s in self._scenes if not s.asset_path]
         pools: dict[int, list[VideoCandidate]] = {}
+        profiler = get_profiler()
 
         if needs_search:
-            workers = min(self.max_search_workers, len(needs_search))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(self._build_video_candidate_pool, scene): scene
-                    for scene in needs_search
-                }
-                for future in as_completed(futures):
-                    scene = futures[future]
-                    try:
-                        pools[scene.scene_number] = future.result()
-                    except Exception as exc:
-                        logger.error(
-                            "Scene %d candidate pool build failed: %s",
-                            scene.scene_number,
-                            exc,
-                        )
-                        pools[scene.scene_number] = []
+            profiler.start(AGENT_ASSET_SEARCH)
+            try:
+                workers = min(self.max_search_workers, len(needs_search))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(self._build_video_candidate_pool, scene): scene
+                        for scene in needs_search
+                    }
+                    for future in as_completed(futures):
+                        scene = futures[future]
+                        try:
+                            pools[scene.scene_number] = future.result()
+                        except Exception as exc:
+                            logger.error(
+                                "Scene %d candidate pool build failed: %s",
+                                scene.scene_number,
+                                exc,
+                            )
+                            pools[scene.scene_number] = []
 
-            for scene in sorted(needs_search, key=lambda s: s.scene_number):
-                if scene.asset_path or scene.pending_url:
-                    continue
-                pool = pools.get(scene.scene_number, [])
-                if pool:
-                    self._select_video_from_pool(scene, pool)
-                if not scene.pending_url:
-                    self._resolve_image_fallback(scene)
+                for scene in sorted(needs_search, key=lambda s: s.scene_number):
+                    if scene.asset_path or scene.pending_url:
+                        continue
+                    pool = pools.get(scene.scene_number, [])
+                    if pool:
+                        self._select_video_from_pool(scene, pool)
+                    if not scene.pending_url:
+                        self._resolve_image_fallback(scene)
+            finally:
+                profiler.end(AGENT_ASSET_SEARCH)
 
         to_download = [
             s
@@ -579,17 +601,21 @@ class VisualTimelineAgent:
             if s.pending_url and s.pending_ext and s.asset_kind and not s.asset_path
         ]
         if to_download:
-            workers = min(self.max_download_workers, len(to_download))
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(self._download_scene_asset, scene): scene
-                    for scene in to_download
-                }
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        logger.error("Parallel download error: %s", exc)
+            profiler.start(AGENT_ASSET_DOWNLOAD)
+            try:
+                workers = min(self.max_download_workers, len(to_download))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(self._download_scene_asset, scene): scene
+                        for scene in to_download
+                    }
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            logger.error("Parallel download error: %s", exc)
+            finally:
+                profiler.end(AGENT_ASSET_DOWNLOAD)
 
     def _build_video_candidate_pool(self, scene: SceneRecord) -> list[VideoCandidate]:
         """Search every query and merge into one deduplicated candidate pool."""
@@ -602,14 +628,18 @@ class VisualTimelineAgent:
         workers = min(len(queries), 5)
 
         def search_query(query: str) -> tuple[str, list[VideoCandidate]]:
+            profiler = get_profiler()
             try:
+                profiler.start(AGENT_PROVIDER_MANAGER)
                 clips = self.provider_manager.search(query, per_page=RESULTS_PER_QUERY)
+                profiler.end(AGENT_PROVIDER_MANAGER)
                 tagged = [
                     replace(c, source_query=query)
                     for c in clips[:RESULTS_PER_QUERY]
                 ]
                 return query, tagged
             except Exception as exc:
+                get_profiler().end(AGENT_PROVIDER_MANAGER)
                 logger.warning(
                     "Scene %d provider search failed for %r: %s",
                     scene.scene_number,
@@ -641,6 +671,8 @@ class VisualTimelineAgent:
     ) -> None:
         url_to_query = self._scene_url_queries.get(scene.scene_number, {})
         queries = scene.queries or ([scene.query] if scene.query else [])
+        profiler = get_profiler()
+        profiler.start(AGENT_CLIP_RANKING)
         ranking = self.clip_ranker.rank(
             title=scene.title,
             visual_description=scene.visual_description,
@@ -650,6 +682,7 @@ class VisualTimelineAgent:
             source_queries=url_to_query,
             scene_number=scene.scene_number,
         )
+        profiler.end(AGENT_CLIP_RANKING)
         if ranking is None:
             return
 
@@ -1172,9 +1205,13 @@ class VisualTimelineAgent:
         if self.output_path.exists():
             self.output_path.unlink()
 
+        profiler = get_profiler()
+        profiler.start(AGENT_SUBTITLE_BURN)
         subtitles = escape_subtitles_path(self.captions_path)
         force_style = build_subtitle_force_style()
         video_filter = f"subtitles={subtitles}:force_style='{force_style}'"
+        profiler.end(AGENT_SUBTITLE_BURN)
+        profiler.start(AGENT_VIDEO_EXPORT)
         command = [
             self.ffmpeg,
             "-y",
@@ -1208,6 +1245,7 @@ class VisualTimelineAgent:
             str(self.output_path.resolve()),
         ]
         self._run_ffmpeg(command, "final video with narration and captions")
+        profiler.end(AGENT_VIDEO_EXPORT)
 
     def _run_ffmpeg(self, command: list[str], label: str) -> None:
         timeout = max(120, int(self._narration_seconds) + FFMPEG_TIMEOUT_BUFFER)
